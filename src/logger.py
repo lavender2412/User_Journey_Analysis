@@ -12,10 +12,3 @@ logging.basicConfig(
     format="[%(asctime)s] %(levelname)s - %(message)s",
     level=logging.INFO,
 )
-
-if __name__ == "__main__":
-    try:
-        a=1/0
-    except Exception as e:
-        logging.error("An error occurred", exc_info=True)
-        logging.info("Logging has started.")
