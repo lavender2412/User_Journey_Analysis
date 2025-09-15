@@ -1,5 +1,6 @@
 import sys #sys library will give info about the exception that has occurred in the runtime
 
+from src.logger import logging #importing logging module from logger.py file
 def error_message_detail(error, error_detail:sys):
     _,_,exc_tb = error_detail.exc_info() #exc_info() method of sys module will give info about the exception that has occurred in the runtime
     file_name = exc_tb.tb_frame.f_code.co_filename #getting the file name where the exception has occurred
@@ -16,3 +17,4 @@ class CustomException(Exception): #inheriting from Exception class
 
     def __str__(self):
         return error_message_detail(self.error, self.error_detail) #returning the error message with details
+    
