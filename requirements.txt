@@ -6,4 +6,5 @@ matplotlib
 joblib
 xgboost
 lightgbm
--e .
+catboost
+#-e .
