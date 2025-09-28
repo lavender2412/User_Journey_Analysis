@@ -1,6 +1,6 @@
 #this will play a important role in data ingestion
 import os
-import sys
+import sys # to use the custom exception
 import src.exception as CustomException
 import logging
 import src.logger  # This ensures your custom logger configuration is applied
