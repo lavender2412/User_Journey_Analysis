@@ -23,7 +23,7 @@ class DataIngestion:
     def initiate_data_ingestion(self):
         logging.info('Data Ingestion method starts')
         try:
-            df=pd.read_csv('notebook/data/stud.csv') #reading the data
+            df=pd.read_csv('notebook/data/user_journey_raw.csv') #reading the data
             logging.info('Dataset read as pandas dataframe')
 
             os.makedirs(os.path.dirname(self.ingestion_config.train_data_path),exist_ok=True) #this will create the artifacts folder if it does not exist
