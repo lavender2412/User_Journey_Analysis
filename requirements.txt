@@ -7,4 +7,5 @@ joblib
 xgboost
 lightgbm
 catboost
-#-e .
+flask
+gunicorn
