@@ -80,6 +80,8 @@ Logistic Regression was selected as the production model based on highest ROC-AU
 
 **Interactive Swagger UI:** [/docs](http://user-journey-funnel-prod.eba-qxna2ttz.us-east-1.elasticbeanstalk.com/docs)
 
+![Swagger UI demo](outputs/swagger_demo.png)
+
 Or call it directly:
 
 ```bash
