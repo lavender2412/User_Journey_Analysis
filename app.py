@@ -223,15 +223,15 @@ def predict(request: PredictRequest):
     tags=['Monitoring'],
 )
 def model_info():
-    if MODEL is None:
-        raise HTTPException(status_code=503, detail='model not loaded')
+    # Always return 200 — useful for diagnosing startup failures.
+    # When no model is loaded, fields default to safe zero/None values.
     return ModelInfoResponse(
         model_name    = MODEL_NAME,
         feature_count = len(FEATURE_NAMES),
         num_classes   = 4,
         stage_labels  = FUNNEL_STAGE_NAMES,
-        test_roc_auc  = artifact.get('test_roc_auc'),
-        weighted_f1   = artifact.get('weighted_f1'),
+        test_roc_auc  = artifact.get('test_roc_auc') if artifact else None,
+        weighted_f1   = artifact.get('weighted_f1')  if artifact else None,
         needs_scaling = NEEDS_SCALING,
     )
 
