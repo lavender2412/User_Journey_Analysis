@@ -1,215 +1,244 @@
 """
 app.py
 ──────
-Flask REST API for the User Journey Funnel Stage Predictor.
+FastAPI REST API for the User Journey Funnel Stage Predictor.
 
 Endpoints:
-    POST /predict   — predict funnel stage from a user journey string
-    GET  /health    — AWS Elastic Beanstalk health check
+    POST /predict    — predict funnel stage from a user journey string
+    GET  /health     — AWS Elastic Beanstalk health check
+    GET  /model-info — model metadata
+
+Interactive docs (Swagger UI):
+    http://localhost:8000/docs          (local)
+    http://<your-eb-url>/docs           (production)
 
 Usage (local):
-    python app.py
+    uvicorn app:app --reload --port 8000
 
-Usage (production via gunicorn):
-    gunicorn app:app --workers 2 --bind 0.0.0.0:8080
+Usage (production via uvicorn):
+    uvicorn app:app --workers 2 --host 0.0.0.0 --port 8000
 
 Example request:
-    curl -X POST http://localhost:5000/predict \
-         -H "Content-Type: application/json" \
+    curl -X POST http://localhost:8000/predict \\
+         -H "Content-Type: application/json" \\
          -d '{"user_journey": "Homepage-Pricing-Sign up-Log in-Coupon",
               "subscription_type": "Annual"}'
 """
 
 import os
+from contextlib import asynccontextmanager
+from typing import Dict, Optional
+
 import joblib
-import numpy as np
-from flask import Flask, request, jsonify
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, field_validator
 
 from feature_utils import engineer_single, FUNNEL_STAGE_NAMES, STAGE_RECOMMENDATIONS
 
-# ── App setup ─────────────────────────────────────────────────────────────────
 
-app = Flask(__name__)
-
-# ── Load model artifact once at startup (not per request) ─────────────────────
-# Loading is expensive (~100ms); keeping it in memory makes inference fast (~1ms).
+# ── Globals (populated at startup) ────────────────────────────────────────────
 
 ARTIFACT_PATH = os.environ.get(
     'MODEL_ARTIFACT_PATH',
     'model_artifacts/funnel_model.joblib'
 )
 
-try:
-    artifact      = joblib.load(ARTIFACT_PATH)
-    MODEL         = artifact['model']
-    SCALER        = artifact.get('scaler')
-    NEEDS_SCALING = artifact.get('needs_scaling', False)
-    MODEL_NAME    = artifact.get('model_name', 'Unknown')
-    FEATURE_NAMES = artifact.get('feature_names', [])
-    print(f'[startup] Model loaded: {MODEL_NAME}')
-    print(f'[startup] Features    : {len(FEATURE_NAMES)}')
-    print(f'[startup] ROC-AUC     : {artifact.get("test_roc_auc", "n/a")}')
-except FileNotFoundError:
-    print(f'[startup] WARNING: artifact not found at {ARTIFACT_PATH}')
-    print('[startup] Run model_training.ipynb Cell 10 first to generate it.')
-    artifact = MODEL = SCALER = None
-    NEEDS_SCALING = False
-    MODEL_NAME    = 'not loaded'
-    FEATURE_NAMES = []
+artifact      = None
+MODEL         = None
+SCALER        = None
+NEEDS_SCALING = False
+MODEL_NAME    = 'not loaded'
+FEATURE_NAMES = []
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Lifespan: load model once at startup ──────────────────────────────────────
 
-VALID_SUBSCRIPTION_TYPES = {'annual', 'monthly', 'quarterly'}
-
-
-def validate_input(data: dict) -> tuple[bool, str]:
-    """
-    Validate the incoming JSON payload.
-
-    Returns:
-        (is_valid: bool, error_message: str)
-    """
-    if 'user_journey' not in data:
-        return False, "'user_journey' field is required"
-
-    journey = data['user_journey']
-
-    if not isinstance(journey, str) or not journey.strip():
-        return False, "'user_journey' must be a non-empty string"
-
-    if len(journey) > 10_000:
-        return False, "'user_journey' exceeds maximum allowed length (10,000 chars)"
-
-    sub_type = data.get('subscription_type', 'Quarterly')
-    if sub_type.lower() not in VALID_SUBSCRIPTION_TYPES:
-        return False, (
-            f"'subscription_type' must be one of: "
-            f"{sorted(VALID_SUBSCRIPTION_TYPES)}"
-        )
-
-    return True, ''
-
-
-# ── Routes ────────────────────────────────────────────────────────────────────
-
-@app.route('/health', methods=['GET'])
-def health():
-    """
-    AWS Elastic Beanstalk health check endpoint.
-    Returns 200 if the model is loaded and ready, 503 otherwise.
-    """
-    if MODEL is None:
-        return jsonify({
-            'status':  'unhealthy',
-            'reason':  'model artifact not loaded',
-            'model':   MODEL_NAME,
-        }), 503
-
-    return jsonify({
-        'status': 'healthy',
-        'model':  MODEL_NAME,
-        'roc_auc': artifact.get('test_roc_auc'),
-        'weighted_f1': artifact.get('weighted_f1'),
-    }), 200
-
-
-@app.route('/predict', methods=['POST'])
-def predict():
-    """
-    Predict the funnel stage for a single user journey.
-
-    Request body (JSON):
-        user_journey      : str   — page sequence, dash-separated
-                                    e.g. "Homepage-Pricing-Sign up-Log in"
-        subscription_type : str   — "Annual" | "Monthly" | "Quarterly"  (optional, default Quarterly)
-
-    Response body (JSON):
-        funnel_stage      : int   — predicted stage (0–3)
-        stage_label       : str   — human-readable stage name
-        recommendation    : str   — suggested business action
-        probabilities     : dict  — P(stage) for each of the 4 stages
-        model             : str   — model name (for transparency)
-    """
-    # ── 1. Parse & validate ───────────────────────────────────────────────────
-    if not request.is_json:
-        return jsonify({'error': 'Content-Type must be application/json'}), 400
-
-    data = request.get_json()
-
-    is_valid, error_msg = validate_input(data)
-    if not is_valid:
-        return jsonify({'error': error_msg}), 422
-
-    if MODEL is None:
-        return jsonify({'error': 'model not loaded — run training notebook first'}), 503
-
-    journey       = data['user_journey'].strip()
-    subscription  = data.get('subscription_type', 'Quarterly')
-
-    # ── 2. Feature engineering ────────────────────────────────────────────────
-    # engineer_single handles the full preprocessing pipeline for one user:
-    # deduplication is NOT applied here — the API accepts already-concatenated
-    # journeys. For session-level input, deduplicate before calling the API.
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Load the model artifact when the server starts, clean up when it stops."""
+    global artifact, MODEL, SCALER, NEEDS_SCALING, MODEL_NAME, FEATURE_NAMES
     try:
-        X_input = engineer_single(journey, subscription_type=subscription)
+        artifact      = joblib.load(ARTIFACT_PATH)
+        MODEL         = artifact['model']
+        SCALER        = artifact.get('scaler')
+        NEEDS_SCALING = artifact.get('needs_scaling', False)
+        MODEL_NAME    = artifact.get('model_name', 'Unknown')
+        FEATURE_NAMES = artifact.get('feature_names', [])
+        print(f'[startup] Model loaded : {MODEL_NAME}')
+        print(f'[startup] Features     : {len(FEATURE_NAMES)}')
+        print(f'[startup] ROC-AUC      : {artifact.get("test_roc_auc", "n/a")}')
+    except FileNotFoundError:
+        print(f'[startup] WARNING: artifact not found at {ARTIFACT_PATH}')
+        print('[startup] Run model_training.ipynb Cell 10 to generate it.')
+    yield
+    # Nothing to clean up for a pure in-memory model
+
+
+# ── FastAPI app ────────────────────────────────────────────────────────────────
+
+app = FastAPI(
+    title       = 'User Journey Funnel Predictor',
+    description = (
+        'Predicts which **funnel stage** a user is in based on their '
+        'clickstream journey.\n\n'
+        '**Funnel stages:**\n'
+        '- `0` Browsing — just exploring, no purchase signals\n'
+        '- `1` Abandoned — showed intent but left\n'
+        '- `2` Interested — strong engagement, not yet converted\n'
+        '- `3` Converted — purchased or earned a certificate\n\n'
+        'Try it out using the **POST /predict** endpoint below — '
+        'paste any dash-separated page journey and hit **Execute**.'
+    ),
+    version     = '1.0.0',
+    lifespan    = lifespan,
+)
+
+
+# ── Pydantic models ───────────────────────────────────────────────────────────
+
+class PredictRequest(BaseModel):
+    user_journey: str = Field(
+        ...,
+        description='Dash-separated sequence of pages visited by the user.',
+        examples=['Homepage-Pricing-Sign up-Log in-Coupon-Checkout'],
+        min_length=1,
+        max_length=10_000,
+    )
+    subscription_type: Optional[str] = Field(
+        default='Quarterly',
+        description='User subscription plan. One of: Annual, Monthly, Quarterly.',
+        examples=['Annual'],
+    )
+
+    @field_validator('subscription_type')
+    @classmethod
+    def validate_subscription(cls, v: str) -> str:
+        valid = {'annual', 'monthly', 'quarterly'}
+        if v.lower() not in valid:
+            raise ValueError(f"subscription_type must be one of: {sorted(valid)}")
+        return v
+
+
+class PredictResponse(BaseModel):
+    funnel_stage:   int            = Field(..., description='Predicted stage index (0–3)')
+    stage_label:    str            = Field(..., description='Human-readable stage name')
+    recommendation: str            = Field(..., description='Suggested business action')
+    probabilities:  Dict[str, float] = Field(..., description='Probability per stage')
+    model:          str            = Field(..., description='Model used for prediction')
+
+
+class HealthResponse(BaseModel):
+    status:      str
+    model:       str
+    roc_auc:     Optional[float] = None
+    weighted_f1: Optional[float] = None
+
+
+class ModelInfoResponse(BaseModel):
+    model_name:    str
+    feature_count: int
+    num_classes:   int
+    stage_labels:  Dict[int, str]
+    test_roc_auc:  Optional[float]
+    weighted_f1:   Optional[float]
+    needs_scaling: bool
+
+
+# ── Endpoints ─────────────────────────────────────────────────────────────────
+
+@app.get(
+    '/health',
+    response_model=HealthResponse,
+    summary='Health check',
+    description='Returns 200 if the model is loaded and ready. Used by AWS EB health checks.',
+    tags=['Monitoring'],
+)
+def health():
+    if MODEL is None:
+        raise HTTPException(status_code=503, detail='model artifact not loaded')
+    return HealthResponse(
+        status      = 'healthy',
+        model       = MODEL_NAME,
+        roc_auc     = artifact.get('test_roc_auc'),
+        weighted_f1 = artifact.get('weighted_f1'),
+    )
+
+
+@app.post(
+    '/predict',
+    response_model=PredictResponse,
+    summary='Predict funnel stage',
+    description=(
+        'Predicts the funnel stage for a single user based on their page journey.\n\n'
+        '**Try it:** paste a dash-separated journey like '
+        '`Homepage-Pricing-Coupon-Checkout` and hit Execute.'
+    ),
+    tags=['Prediction'],
+)
+def predict(request: PredictRequest):
+    if MODEL is None:
+        raise HTTPException(status_code=503, detail='model not loaded — run training notebook first')
+
+    # ── Feature engineering ───────────────────────────────────────────────────
+    try:
+        X_input = engineer_single(
+            journey           = request.user_journey.strip(),
+            subscription_type = request.subscription_type,
+        )
     except Exception as e:
-        return jsonify({'error': f'feature engineering failed: {str(e)}'}), 500
+        raise HTTPException(status_code=500, detail=f'feature engineering failed: {e}')
 
     # Reindex to guarantee column order matches training
-    # (safety net in case feature_utils is updated without retraining)
     X_input = X_input.reindex(columns=FEATURE_NAMES, fill_value=0)
 
-    # ── 3. Scale if required (Logistic Regression needs StandardScaler) ───────
+    # ── Scale if required (Logistic Regression uses StandardScaler) ───────────
     X_inference = SCALER.transform(X_input) if NEEDS_SCALING else X_input
 
-    # ── 4. Predict ────────────────────────────────────────────────────────────
+    # ── Predict ───────────────────────────────────────────────────────────────
     try:
-        stage_idx  = int(MODEL.predict(X_inference)[0])
-        raw_probs  = MODEL.predict_proba(X_inference)[0]
+        stage_idx = int(MODEL.predict(X_inference)[0])
+        raw_probs = MODEL.predict_proba(X_inference)[0]
     except Exception as e:
-        return jsonify({'error': f'prediction failed: {str(e)}'}), 500
+        raise HTTPException(status_code=500, detail=f'prediction failed: {e}')
 
-    # ── 5. Build response ─────────────────────────────────────────────────────
-    probabilities = {
-        FUNNEL_STAGE_NAMES[i]: round(float(p), 4)
-        for i, p in enumerate(raw_probs)
-    }
-
-    response = {
-        'funnel_stage':   stage_idx,
-        'stage_label':    FUNNEL_STAGE_NAMES[stage_idx],
-        'recommendation': STAGE_RECOMMENDATIONS[stage_idx],
-        'probabilities':  probabilities,
-        'model':          MODEL_NAME,
-    }
-
-    return jsonify(response), 200
+    # ── Build response ────────────────────────────────────────────────────────
+    return PredictResponse(
+        funnel_stage   = stage_idx,
+        stage_label    = FUNNEL_STAGE_NAMES[stage_idx],
+        recommendation = STAGE_RECOMMENDATIONS[stage_idx],
+        probabilities  = {
+            FUNNEL_STAGE_NAMES[i]: round(float(p), 4)
+            for i, p in enumerate(raw_probs)
+        },
+        model = MODEL_NAME,
+    )
 
 
-@app.route('/model-info', methods=['GET'])
+@app.get(
+    '/model-info',
+    response_model=ModelInfoResponse,
+    summary='Model metadata',
+    description='Returns information about the currently loaded model — useful for debugging and monitoring.',
+    tags=['Monitoring'],
+)
 def model_info():
-    """
-    Return metadata about the currently loaded model.
-    Useful for debugging and monitoring in production.
-    """
     if MODEL is None:
-        return jsonify({'error': 'model not loaded'}), 503
+        raise HTTPException(status_code=503, detail='model not loaded')
+    return ModelInfoResponse(
+        model_name    = MODEL_NAME,
+        feature_count = len(FEATURE_NAMES),
+        num_classes   = 4,
+        stage_labels  = FUNNEL_STAGE_NAMES,
+        test_roc_auc  = artifact.get('test_roc_auc'),
+        weighted_f1   = artifact.get('weighted_f1'),
+        needs_scaling = NEEDS_SCALING,
+    )
 
-    return jsonify({
-        'model_name':     MODEL_NAME,
-        'feature_count':  len(FEATURE_NAMES),
-        'num_classes':    4,
-        'stage_labels':   FUNNEL_STAGE_NAMES,
-        'test_roc_auc':   artifact.get('test_roc_auc'),
-        'weighted_f1':    artifact.get('weighted_f1'),
-        'needs_scaling':  NEEDS_SCALING,
-    }), 200
 
-
-# ── Entry point ────────────────────────────────────────────────────────────────
+# ── Entry point (local dev) ────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    port  = int(os.environ.get('PORT', 5000))
-    debug = os.environ.get('FLASK_DEBUG', 'false').lower() == 'true'
-    app.run(host='0.0.0.0', port=port, debug=debug)
+    import uvicorn
+    port = int(os.environ.get('PORT', 8000))
+    uvicorn.run('app:app', host='0.0.0.0', port=port, reload=True)

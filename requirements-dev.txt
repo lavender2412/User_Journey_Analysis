@@ -18,3 +18,7 @@ seaborn>=0.12
 # On EMR/Databricks, PySpark is pre-installed on the cluster.
 pyspark>=3.5
 pyarrow>=14.0
+
+# Legacy Flask (kept for reference only — replaced by FastAPI)
+# flask>=3.0
+# gunicorn>=21.0
