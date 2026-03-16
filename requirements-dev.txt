@@ -1,0 +1,20 @@
+# Full local development dependencies
+# Install with: pip3 install -r requirements-dev.txt
+#
+# Includes everything in requirements.txt plus:
+#   - Jupyter for running notebooks
+#   - matplotlib/seaborn for model_training.ipynb visualisations
+#   - PySpark + Arrow for spark_pipeline.py ETL layer
+
+-r requirements.txt
+
+# Notebooks
+jupyter>=1.0
+ipykernel>=6.0
+matplotlib>=3.7
+seaborn>=0.12
+
+# PySpark ETL layer (spark_pipeline.py)
+# On EMR/Databricks, PySpark is pre-installed on the cluster.
+pyspark>=3.5
+pyarrow>=14.0
