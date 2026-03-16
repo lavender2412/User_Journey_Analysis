@@ -34,7 +34,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
-from feature_utils import engineer_single, FUNNEL_STAGE_NAMES, STAGE_RECOMMENDATIONS
+from .feature_utils import engineer_single, FUNNEL_STAGE_NAMES, STAGE_RECOMMENDATIONS
 
 
 # ── Globals (populated at startup) ────────────────────────────────────────────

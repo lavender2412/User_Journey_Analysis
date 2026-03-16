@@ -56,13 +56,13 @@ Raw clickstream CSV
 Logistic Regression was selected as the production model based on highest ROC-AUC and F1 score.
 
 ### ROC Curves
-![ROC Curves](roc_curves.png)
+![ROC Curves](outputs/roc_curves.png)
 
 ### Confusion Matrices
-![Confusion Matrices](confusion_matrices.png)
+![Confusion Matrices](outputs/confusion_matrices.png)
 
 ### Feature Importance
-![Feature Importance](feature_importance.png)
+![Feature Importance](outputs/feature_importance.png)
 
 ---
 
@@ -116,7 +116,7 @@ cd User_Journey_Analysis
 pip install -r requirements.txt
 
 # Start the API
-uvicorn app:app --reload --port 8000
+uvicorn src.app:app --reload --port 8000
 # Open http://localhost:8000/docs
 ```
 
@@ -124,8 +124,8 @@ To re-run the full pipeline locally (requires Java 17+ for PySpark):
 
 ```bash
 pip install -r requirements-dev.txt
-python spark_pipeline.py          # generates spark_output/features.parquet
-jupyter notebook model_training.ipynb  # retrains and saves model_artifacts/
+python src/spark_pipeline.py               # generates spark_output/features.parquet
+jupyter notebook notebooks/model_training.ipynb  # retrains and saves model_artifacts/
 ```
 
 ---
@@ -133,13 +133,24 @@ jupyter notebook model_training.ipynb  # retrains and saves model_artifacts/
 ## Project Structure
 
 ```
-├── app.py                  # FastAPI app — /predict, /health, /model-info
-├── feature_utils.py        # Pure Python feature engineering (mirrors Spark pipeline)
-├── spark_pipeline.py       # PySpark batch ETL for training data generation
-├── model_training.ipynb    # Model training, evaluation, and artifact export
-├── data_analysis.ipynb     # Exploratory data analysis
+├── src/
+│   ├── app.py              # FastAPI app — /predict, /health, /model-info
+│   ├── feature_utils.py    # Pure Python feature engineering (mirrors Spark pipeline)
+│   └── spark_pipeline.py   # PySpark batch ETL for training data generation
+├── notebooks/
+│   ├── model_training.ipynb      # Model training, evaluation, and artifact export
+│   ├── feature_engineering.ipynb # Feature engineering exploration
+│   ├── data_analysis.ipynb       # Exploratory data analysis
+│   └── data_preprocessing.ipynb  # Data cleaning and preprocessing
+├── data/
+│   └── user_journey_raw.csv      # Raw clickstream data
+├── outputs/
+│   ├── confusion_matrices.png
+│   ├── roc_curves.png
+│   ├── feature_importance.png
+│   └── model_summary.csv
 ├── model_artifacts/
-│   └── funnel_model.joblib # Trained model + scaler + metadata
+│   └── funnel_model.joblib       # Trained model + scaler + metadata
 ├── requirements.txt        # API runtime dependencies (used by Elastic Beanstalk)
 ├── requirements-dev.txt    # Full local dev dependencies (adds PySpark, Jupyter)
 ├── Procfile                # uvicorn startup command for Elastic Beanstalk
