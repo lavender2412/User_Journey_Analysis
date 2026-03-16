@@ -1,0 +1,119 @@
+name: CI/CD — Deploy to AWS Elastic Beanstalk
+
+# Trigger: push to main branch only
+# Pull requests run tests but do NOT deploy
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  PYTHON_VERSION: "3.12"
+  EB_APP_NAME:    "user-journey-funnel"        # must match your EB application name
+  EB_ENV_NAME:    "user-journey-funnel-prod"   # must match your EB environment name
+  AWS_REGION:     "us-east-1"                  # change to your region
+
+jobs:
+
+  # ── Job 1: Test ──────────────────────────────────────────────────────────────
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Verify feature_utils imports cleanly
+        run: python -c "from feature_utils import engineer_single, FUNNEL_STAGE_NAMES; print('feature_utils OK')"
+
+      - name: Verify app imports cleanly (no model required)
+        run: python -c "import app; print('app.py import OK')"
+
+      - name: Run API smoke test
+        run: |
+          python -c "
+          from flask.testing import FlaskClient
+          import app as flask_app
+
+          client = flask_app.app.test_client()
+
+          # /health should return 200 if model is loaded, 503 if not (both are valid in CI)
+          r = client.get('/health')
+          assert r.status_code in (200, 503), f'Unexpected status: {r.status_code}'
+          print('/health smoke test passed:', r.status_code)
+
+          # /predict without body should return 400
+          r = client.post('/predict', data='{}', content_type='application/json')
+          assert r.status_code in (400, 422, 503), f'Unexpected status: {r.status_code}'
+          print('/predict validation test passed:', r.status_code)
+          "
+
+  # ── Job 2: Deploy (only on push to main, not on PRs) ────────────────────────
+  deploy:
+    name: Deploy to Elastic Beanstalk
+    runs-on: ubuntu-latest
+    needs: test                           # only runs if test job passes
+    if: github.event_name == 'push'       # skip deploy on pull_request events
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Create deployment package
+        run: |
+          # Zip everything except notebooks, raw data, and dev artifacts
+          zip -r deploy.zip . \
+            --exclude "*.ipynb" \
+            --exclude "*.csv" \
+            --exclude ".git/*" \
+            --exclude "__pycache__/*" \
+            --exclude "*.pyc" \
+            --exclude ".DS_Store" \
+            --exclude "confusion_matrices.png" \
+            --exclude "roc_curves.png" \
+            --exclude "feature_importance.png"
+          echo "Package size: $(du -sh deploy.zip | cut -f1)"
+
+      - name: Deploy to Elastic Beanstalk
+        uses: einaregilsson/beanstalk-deploy@v22
+        with:
+          aws_access_key:       ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_key:       ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          application_name:     ${{ env.EB_APP_NAME }}
+          environment_name:     ${{ env.EB_ENV_NAME }}
+          region:               ${{ env.AWS_REGION }}
+          version_label:        ${{ github.sha }}
+          deployment_package:   deploy.zip
+
+      - name: Verify deployment health
+        run: |
+          echo "Deployment complete — SHA: ${{ github.sha }}"
+          echo "Check environment health at:"
+          echo "https://console.aws.amazon.com/elasticbeanstalk/home?region=${{ env.AWS_REGION }}"
