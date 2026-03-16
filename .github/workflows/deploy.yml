@@ -43,20 +43,25 @@ jobs:
       - name: Run API smoke test
         run: |
           python -c "
-          from flask.testing import FlaskClient
-          import app as flask_app
+          from fastapi.testclient import TestClient
+          import app
 
-          client = flask_app.app.test_client()
+          client = TestClient(app.app, raise_server_exceptions=False)
 
-          # /health should return 200 if model is loaded, 503 if not (both are valid in CI)
+          # /health — 200 if model artifact is present in CI, 503 if not (both valid)
           r = client.get('/health')
-          assert r.status_code in (200, 503), f'Unexpected status: {r.status_code}'
+          assert r.status_code in (200, 503), f'/health unexpected status: {r.status_code}'
           print('/health smoke test passed:', r.status_code)
 
-          # /predict without body should return 400
-          r = client.post('/predict', data='{}', content_type='application/json')
-          assert r.status_code in (400, 422, 503), f'Unexpected status: {r.status_code}'
+          # /predict with empty body — FastAPI returns 422 Unprocessable Entity for missing fields
+          r = client.post('/predict', json={})
+          assert r.status_code in (422, 503), f'/predict validation test unexpected status: {r.status_code}'
           print('/predict validation test passed:', r.status_code)
+
+          # /model-info — always 200 (even without model loaded)
+          r = client.get('/model-info')
+          assert r.status_code == 200, f'/model-info unexpected status: {r.status_code}'
+          print('/model-info smoke test passed:', r.status_code)
           "
 
   # ── Job 2: Deploy (only on push to main, not on PRs) ────────────────────────
